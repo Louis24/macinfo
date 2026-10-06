@@ -1,0 +1,33 @@
+# Build output (local experiments and CI scratch directories)
+build*/
+out/
+dmg-root/
+cli/
+
+# Binaries downloaded back from GitHub Actions
+artifacts/
+bin/
+*.dmg
+*.pkg
+*.tar.gz
+*.sha256
+SHA256SUMS
+
+# Object files / Windows leftovers from local sanity builds
+*.o
+*.obj
+*.exe
+
+# Credentials and machine-local settings (see .env.example)
+.env
+.env.local
+.env.*
+!.env.example
+
+# Editors and tooling
+.cache/
+compile_commands.json
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,109 @@
+name: Build for macOS
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  APP_NAME: MacInfo
+  APP_VERSION: 1.0.0
+  BUNDLE_ID: com.louis24.macinfo
+
+jobs:
+  build-macos:
+    # Real Apple hardware in the cloud, with the official Xcode toolchain.
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          uname -m
+          cmake --version | head -1
+          clang --version | head -1
+
+      # ---------------------------------------------------------------- build
+      # One universal (arm64 + x86_64) build: every Mac can run the result.
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DUNIVERSAL=ON
+
+      - name: Build
+        run: cmake --build build --config Release -j "$(sysctl -n hw.ncpu)"
+
+      # ---------------------------------------------------------------- app bundle
+      - name: Generate app icon
+        run: sh resources/make_icns.sh resources/AppIcon.png "build/${APP_NAME}.app/Contents/Resources/AppIcon.icns"
+
+      - name: Inspect bundle
+        run: |
+          find "build/${APP_NAME}.app" -maxdepth 3
+          plutil -lint "build/${APP_NAME}.app/Contents/Info.plist"
+          lipo -info "build/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
+          lipo -info build/macinfo
+
+      - name: Smoke test
+        run: |
+          echo "--- CLI ---"
+          ./build/macinfo
+          echo "--- .app executable (no window server on CI, so --report) ---"
+          "build/${APP_NAME}.app/Contents/MacOS/${APP_NAME}" --report
+
+      - name: Ad-hoc code sign
+        run: |
+          codesign --force --sign - "build/${APP_NAME}.app"
+          codesign --verify --verbose=2 "build/${APP_NAME}.app"
+          spctl -a -t exec -vv "build/${APP_NAME}.app" || echo "(expected: Gatekeeper will ask to approve on first launch, see release notes)"
+
+      # ---------------------------------------------------------------- installers
+      - name: Build .dmg (double-click, drag to Applications)
+        run: |
+          rm -rf dmg-root && mkdir dmg-root
+          cp -R "build/${APP_NAME}.app" dmg-root/
+          ln -s /Applications dmg-root/Applications
+          hdiutil create -volname "${APP_NAME}" -srcfolder dmg-root -ov -format UDZO \
+            "${APP_NAME}-${APP_VERSION}.dmg"
+          # verify right after create is flaky on the runners (DiskArbitration not ready yet), so retry
+          ok=0
+          for i in 1 2 3 4 5; do
+            if hdiutil verify "${APP_NAME}-${APP_VERSION}.dmg"; then ok=1; break; fi
+            echo "verify attempt $i failed, waiting..."
+            sleep 5
+          done
+          [ "$ok" = 1 ] || { echo "hdiutil verify never succeeded"; exit 1; }
+
+      - name: Build .pkg (double-click installer)
+        run: |
+          pkgbuild --component "build/${APP_NAME}.app" \
+                   --install-location /Applications \
+                   --version "${APP_VERSION}" \
+                   --identifier "${BUNDLE_ID}" \
+                   "${APP_NAME}-${APP_VERSION}.pkg"
+          ls -lh "${APP_NAME}-${APP_VERSION}.pkg"
+          pkgutil --pkg-info "${APP_NAME}-${APP_VERSION}.pkg" || echo "(pkgutil could not read it, keep going)"
+          pkgutil --payload-files "${APP_NAME}-${APP_VERSION}.pkg" | head -5 || true
+
+      - name: Package command line tool
+        run: |
+          mkdir -p cli/bin
+          cp build/macinfo cli/bin/macinfo
+          tar -czf macinfo-cli.tar.gz -C cli bin
+
+      - name: Checksums
+        run: |
+          shasum -a 256 "${APP_NAME}-${APP_VERSION}.dmg" \
+                       "${APP_NAME}-${APP_VERSION}.pkg" \
+                       macinfo-cli.tar.gz | tee SHA256SUMS
+          ls -lh "${APP_NAME}-${APP_VERSION}.dmg" "${APP_NAME}-${APP_VERSION}.pkg" macinfo-cli.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: |
+            MacInfo-1.0.0.dmg
+            MacInfo-1.0.0.pkg
+            macinfo-cli.tar.gz
+            SHA256SUMS
+          if-no-files-found: error
